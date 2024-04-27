@@ -1,0 +1,143 @@
+#include <Arduino.h>
+
+#define DHT11_PIN PB9
+#define RELAY_PIN PB6
+#define SOIL_SENSOR_POWER_PIN PA7
+#define SOIL_SENSOR_ANALOG_PIN PA0
+#define RED_LED PA3
+#define ORANGE_LED PA5
+#define GREEN_LED PA9
+
+uint8_t RHI, RHD, TCI, TCD, SUM;
+uint32_t pMillis, cMillis;
+float tCelsius = 0;
+float RH = 0;
+uint16_t readValue;
+
+const float TEMP_THRESHOLD = 28.0;              // Threshold temperature in Celsius
+const float HUMIDITY_THRESHOLD = 50.0;          // Threshold humidity in percentage
+const uint16_t SOIL_MOISTURE_THRESHOLD = 900;  // Threshold value for soil moisture
+
+const unsigned long RELAY_ON_TIME = 2500;       // Time to keep relay on when threshold crossed (in milliseconds), now 3 seconds
+const unsigned long SENSOR_CHECK_INTERVAL = 10000; // Interval between sensor readings, now 10 seconds
+const unsigned long GREEN_LED_ON_TIME = 5000;   // Time to keep green LED on after successful watering (in milliseconds), now 5 seconds
+unsigned long previousSensorCheckMillis = 0;    // will store last time the sensor was read
+unsigned long greenLedOnTime = 0;               // will store the time when green LED was turned on
+
+void microDelay(uint16_t delay) {
+  delayMicroseconds(delay);
+}
+
+uint8_t DHT11_Start(void) {
+  uint8_t Response = 0;
+  pinMode(DHT11_PIN, OUTPUT);
+  digitalWrite(DHT11_PIN, LOW);
+  delay(20);
+  digitalWrite(DHT11_PIN, HIGH);
+  microDelay(30);
+  pinMode(DHT11_PIN, INPUT_PULLUP);
+  microDelay(40);
+  if (!digitalRead(DHT11_PIN)) {
+    microDelay(80);
+    if (digitalRead(DHT11_PIN)) Response = 1;
+  }
+  pMillis = millis();
+  cMillis = millis();
+  while (digitalRead(DHT11_PIN) && pMillis + 2 > cMillis) {
+    cMillis = millis();
+  }
+  return Response;
+}
+
+uint8_t DHT11_Read(void) {
+  uint8_t a, b = 0; // Ensure b is initialized to 0
+  for (a = 0; a < 8; a++) {
+    pMillis = millis();
+    cMillis = millis();
+    while (!digitalRead(DHT11_PIN) && pMillis + 2 > cMillis) {
+      cMillis = millis();
+    }
+    delayMicroseconds(40); // Wait for the data bit to be ready
+    if (digitalRead(DHT11_PIN))
+      b |= (1 << (7 - a));
+    else
+      b &= ~(1 << (7 - a));
+    pMillis = millis();
+    cMillis = millis();
+    while (digitalRead(DHT11_PIN) && pMillis + 2 > cMillis) {
+      cMillis = millis();
+    }
+  }
+  return b;
+}
+
+void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);     // For indicating sensor read status
+  pinMode(RELAY_PIN, OUTPUT);       // For controlling the relay
+  digitalWrite(RELAY_PIN, LOW);     // Initially turn off the relay
+  pinMode(DHT11_PIN, OUTPUT);
+  pinMode(SOIL_SENSOR_POWER_PIN, OUTPUT);
+  pinMode(RED_LED, OUTPUT);         // Red LED
+  pinMode(ORANGE_LED, OUTPUT);      // Orange LED
+  pinMode(GREEN_LED, OUTPUT);       // Green LED
+  digitalWrite(SOIL_SENSOR_POWER_PIN, LOW); // Initialize SOIL_SENSOR_POWER_PIN
+  Serial.begin(9600);
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+  
+  if (currentMillis - previousSensorCheckMillis >= SENSOR_CHECK_INTERVAL) {
+    previousSensorCheckMillis = currentMillis; // save the last time you read the sensors
+
+    if (DHT11_Start()) {
+      RHI = DHT11_Read();
+      RHD = DHT11_Read();
+      TCI = DHT11_Read();
+      TCD = DHT11_Read();
+      SUM = DHT11_Read();
+      if ((RHI + RHD + TCI + TCD) == SUM) {
+        tCelsius = TCI + TCD / 10.0;
+        RH = RHI + RHD / 10.0;
+        
+        digitalWrite(SOIL_SENSOR_POWER_PIN, HIGH);
+        delay(10); // Wait for stabilization
+        readValue = analogRead(SOIL_SENSOR_ANALOG_PIN);
+        digitalWrite(SOIL_SENSOR_POWER_PIN, LOW);
+
+        Serial.print("Temperature: ");
+        Serial.print(tCelsius);
+        Serial.print("°C, Humidity: ");
+        Serial.print(RH);
+        Serial.print("%, Soil Moisture: ");
+        Serial.println(readValue);
+        
+        if (tCelsius > TEMP_THRESHOLD || RH < HUMIDITY_THRESHOLD || readValue > SOIL_MOISTURE_THRESHOLD) {
+          digitalWrite(RED_LED, HIGH); // Red LED on
+          delay(3000);
+          digitalWrite(RED_LED, LOW); // Wait for 3 seconds
+          digitalWrite(RELAY_PIN, HIGH); // Water pump ON
+          digitalWrite(ORANGE_LED, HIGH); // Orange LED on
+          Serial.println("Water pump is on");
+          delay(RELAY_ON_TIME); // Wait for RELAY_ON_TIME milliseconds
+          digitalWrite(RELAY_PIN, LOW); // Water pump OFF
+          digitalWrite(ORANGE_LED, LOW); // Orange LED off
+          Serial.println("Water pump is off");
+        } else {
+          digitalWrite(GREEN_LED, HIGH); // Green LED on
+          greenLedOnTime = currentMillis; // save the time when green LED was turned on
+        }
+      } else {
+        Serial.println("Checksum failed, data invalid.");
+      }
+      digitalWrite(LED_BUILTIN, HIGH); // Turn on built-in LED to indicate successful read
+      delay(100); // Short delay to visually distinguish LED status change
+      digitalWrite(LED_BUILTIN, LOW);
+      
+      // Turn off green LED after GREEN_LED_ON_TIME milliseconds
+      if (currentMillis - greenLedOnTime >= GREEN_LED_ON_TIME) {
+        digitalWrite(GREEN_LED, LOW); // Green LED off
+      }
+    }
+  }
+}
